@@ -2,7 +2,12 @@ package org.gerdi.submit.zenodo;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.kubernetes.client.ApiException;
+import org.gerdi.submit.KubernetesUtil;
 import org.gerdi.submit.component.AbstractSubmitComponent;
+import org.gerdi.submit.model.exception.GerdiSubmitException;
+import org.gerdi.submit.model.submit.ResearchDataInputStream;
 import org.gerdi.submit.security.GeRDIUser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,27 +27,30 @@ public class SubmitComponentImpl extends AbstractSubmitComponent {
     private static final byte[] LINE_FEED = "\r\n".getBytes();
 
     @Override
-    public String submitData(final String s, final JsonNode metadata, final List<String> list, final GeRDIUser geRDIUser) {
+    public String submitData(final String s, final JsonNode metadata, final List<ResearchDataInputStream> list, final GeRDIUser geRDIUser) throws GerdiSubmitException {
         // Create empty upload
         final URL createurl;
+        final String accessToken = metadata.get("access_token").asText();
+        ((ObjectNode) metadata).remove("access_token");
+
         try {
-            createurl = new URL("https://zenodo.org/api/deposit/depositions?access_token=xd1GzkuWtIyXJeL3r3yPxsZ8oe3JEd4Zod0tceTZWEVBnAw22YLIndcp9ssD");
+            createurl = new URL("https://zenodo.org/api/deposit/depositions?access_token=" + accessToken);
         } catch (MalformedURLException e) {
             LOGGER.error("Malformed URL", e);
-            return "{\"message\":\"Internal error\"}";
+            throw new GerdiSubmitException("{\"message\":\"Internal error\"}");
         }
         int id = createEmptyUpload(createurl);
         if (id == -1) {
-            return "{\"message\":\"Could not create empty upload.\"}";
+            throw new GerdiSubmitException("{\"message\":\"Could not create empty upload.\"}");
         }
 
         // Transmit metadata
         final URL metadataurl;
         try {
-            metadataurl = new URL("https://zenodo.org/api/deposit/depositions/" + id + "?access_token=xd1GzkuWtIyXJeL3r3yPxsZ8oe3JEd4Zod0tceTZWEVBnAw22YLIndcp9ssD");
+            metadataurl = new URL("https://zenodo.org/api/deposit/depositions/" + id + "?access_token=" + accessToken);
         } catch (MalformedURLException e) {
             LOGGER.error("Malformed URL", e);
-            return "{\"message\":\"Internal error\"}";
+            throw new GerdiSubmitException("{\"message\":\"Internal error\"}");
         }
         String metadataErrorResponse = sendMetadata(metadata, metadataurl);
         if (metadataErrorResponse != null) return metadataErrorResponse;
@@ -50,16 +58,16 @@ public class SubmitComponentImpl extends AbstractSubmitComponent {
         // Transmit data
         final URL dataurl;
         try {
-            dataurl = new URL("https://zenodo.org/api/deposit/depositions/" + id + "/files?access_token=xd1GzkuWtIyXJeL3r3yPxsZ8oe3JEd4Zod0tceTZWEVBnAw22YLIndcp9ssD");
+            dataurl = new URL("https://zenodo.org/api/deposit/depositions/" + id + "/files?access_token=" + accessToken);
         } catch (MalformedURLException e) {
             LOGGER.error("Malformed URL", e);
-            return "{\"message\":\"Internal error\"}";
+            throw new GerdiSubmitException("{\"message\":\"Internal error\"}");
         }
-        for (String file: list) {
-            String dataErrorResponse = sendData(file, dataurl);
-            if (dataErrorResponse != null) return dataErrorResponse;
+        for (ResearchDataInputStream file: list) {
+            new Thread(() -> sendData(file, dataurl)).start();
+//            if (dataErrorResponse != null) return dataErrorResponse;
         }
-        return null;
+        return Integer.toString(id);
     }
 
     private int createEmptyUpload(final URL url) {
@@ -102,7 +110,7 @@ public class SubmitComponentImpl extends AbstractSubmitComponent {
         return -1;
     }
 
-    private String sendData(final String file, final URL url) {
+    private String sendData(final ResearchDataInputStream fis, final URL url) {
         try {
             HttpURLConnection connection = (HttpURLConnection) url.openConnection();
             connection.setDoOutput(true);
@@ -116,21 +124,9 @@ public class SubmitComponentImpl extends AbstractSubmitComponent {
             try (OutputStream os = connection.getOutputStream()) {
                 os.write(LINE_FEED);
                 os.write(LINE_FEED);
-                FileInputStream fis = new FileInputStream(new File(file));
-                final int index = file.lastIndexOf('/');
-                final String filename;
-                if (index == -1) {
-                    filename = file;
-                } else {
-                    final String lastPart = file.substring(index + 1);
-                    if (lastPart.equals("")) {
-                        return "{\"message\":\"'"+ file + "' is not a file\"}";
-                    }
-                    filename = lastPart;
-                }
                 os.write(("--"+BOUNDARY).getBytes());
                 os.write(LINE_FEED);
-                os.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"").getBytes());
+                os.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + fis.getName() + "\"").getBytes());
                 os.write(LINE_FEED);
                 os.write("Content-Type: text/plain".getBytes());
                 os.write(LINE_FEED);
