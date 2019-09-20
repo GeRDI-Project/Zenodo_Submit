@@ -7,6 +7,7 @@ import io.kubernetes.client.ApiException;
 import org.gerdi.submit.KubernetesUtil;
 import org.gerdi.submit.component.AbstractSubmitComponent;
 import org.gerdi.submit.model.exception.GerdiSubmitException;
+import org.gerdi.submit.model.submit.CopyStatus;
 import org.gerdi.submit.model.submit.ResearchDataInputStream;
 import org.gerdi.submit.security.GeRDIUser;
 import org.slf4j.Logger;
@@ -43,7 +44,6 @@ public class SubmitComponentImpl extends AbstractSubmitComponent {
         if (id == -1) {
             throw new GerdiSubmitException("{\"message\":\"Could not create empty upload.\"}");
         }
-
         // Transmit metadata
         final URL metadataurl;
         try {
@@ -52,8 +52,10 @@ public class SubmitComponentImpl extends AbstractSubmitComponent {
             LOGGER.error("Malformed URL", e);
             throw new GerdiSubmitException("{\"message\":\"Internal error\"}");
         }
-        String metadataErrorResponse = sendMetadata(metadata, metadataurl);
-        if (metadataErrorResponse != null) return metadataErrorResponse;
+        if (metadata.has("description") && metadata.has("title") && metadata.has("upload_type")) {
+            String metadataErrorResponse = sendMetadata(metadata, metadataurl);
+            if (metadataErrorResponse != null) return metadataErrorResponse;
+        }
 
         // Transmit data
         final URL dataurl;
@@ -112,6 +114,11 @@ public class SubmitComponentImpl extends AbstractSubmitComponent {
 
     private String sendData(final ResearchDataInputStream fis, final URL url) {
         try {
+            Thread.sleep(500);
+        } catch (InterruptedException e) {
+            LOGGER.debug("Sleep interrupted.", e);
+        }
+        try {
             HttpURLConnection connection = (HttpURLConnection) url.openConnection();
             connection.setDoOutput(true);
             connection.setDoInput(true);
@@ -146,18 +153,26 @@ public class SubmitComponentImpl extends AbstractSubmitComponent {
             try (BufferedReader br = connection.getResponseCode() >= 300 ? new BufferedReader(new InputStreamReader(connection.getErrorStream(), "utf-8")) : new BufferedReader(new InputStreamReader(connection.getInputStream(), "utf-8")) ) {
                 StringBuilder response = new StringBuilder();
                 String responseLine = null;
+                fis.setStatus(CopyStatus.RUNNING);
                 while ((responseLine = br.readLine()) != null) {
                     response.append(responseLine.trim());
                 }
+                fis.setStatus(CopyStatus.FINISHED);
                 if (connection.getResponseCode() >= 300) {
+                    fis.setStatus(CopyStatus.ERROR);
                     JsonNode errorResponse = new ObjectMapper().readTree(response.toString());
+                    LOGGER.error("Uploading file return a code 300 or above: " + errorResponse.toString());
                     return errorResponse.toString();
                 }
             } catch (IOException e) {
+                fis.setStatus(CopyStatus.ERROR);
+                LOGGER.error("Error while uploading data.", e);
                 throw new IllegalStateException(e);
             }
 
         } catch (IOException e) {
+            fis.setStatus(CopyStatus.ERROR);
+            LOGGER.error("Error while uploading data.", e);
             throw new IllegalStateException(e);
         }
         return null;
